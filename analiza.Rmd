@@ -1,0 +1,441 @@
+---
+title: "Raport - rozwój poszczególnych państw i obrót bitcoinem"
+author: "Paweł Korobczyński"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r include = FALSE, echo = FALSE}
+knitr::opts_chunk$set(echo = TRUE, results = "hide", warning = FALSE, message = FALSE, out.width = "100%")
+set.seed(100)
+#install.packages("readxl")
+#install.packages("dplyr")
+#install.packages("tidyr")
+#install.packages("DT")
+#install.packages("ggplot2")
+#install.packages("gganimate")
+#install.packages("gifski")
+#install.packages("caret")
+#install.packages("knitr")
+#install.packages("ggcorrplot")
+#install.packages("plotly")
+#install.packages("gridExtra")
+#install.packages("kableExtra")
+```
+
+## Executive summary
+Dane wykorzystane w niniejszej analizie zostały zebrane przez różne instytucje, głównie przez Bank Światowy. Zawierają one między innymi informacje na temat wskaźników gospodarczych państw w poszczególnych latach (1920-2020). Dodatkowo, w analizie zostały wykorzystane dane na temat obrotu bitcoinem, cen złota oraz miesięcznych wynikach S&P Composite. Dane zostały poddane czyszczeniu oraz licznym tranformacjom umożliwiającym analizę.
+
+Analiza zbiorów danych obejmowała sprawdzenie najbardziej interesujących korelacji między poszczególnymi wskaźnikami gospodarczymi oraz próbę ich interpretacji. Została również sprawdzona korelacja między ceną bitcoina a kolumnami w zbiorze dotyczącym bitcoina, cen złota oraz S&P Composite w celu stworzenia regresora. Ponadto, przeanalizowana została populacja Chin, Indii oraz USA.
+
+Model regresji przewidujący cenę bitcoina został stworzony z wykorzystaniem algorytmu `lasso` oraz `ridge`.
+
+
+## Wykorzystane biblioteki
+* readxl
+* dplyr
+* tidyr
+* tibble
+* DT
+* ggplot2
+* gganimate
+* gifski
+* caret
+* knitr
+* ggcorrplot
+* plotly
+* gridExtra
+* kableExtra
+```{r}
+library("readxl")
+library("dplyr")
+library("tidyr")
+library("tibble")
+library("DT")
+library("ggplot2")
+library("gganimate")
+library("gifski")
+library("caret")
+library("knitr")
+library("ggcorrplot")
+library("plotly")
+library("gridExtra")
+library("kableExtra")
+```
+
+## Wczytanie danych
+Dane zostały wczytane z wykorzystaniem standardowej funkcji `read.csv` oraz `read_excel` pochodzącej z biblioteki `readxl`.
+```{r, cache = TRUE, class.source = "fold-show"}
+wdi <- read_excel("./data/World_Development_Indicators.xlsx")
+sp_composite <- read.csv("./data/S&P Composite.csv")
+gold_prices <- read.csv("./data/Gold Prices.csv")
+bitcoin_diff <- read.csv("./data/Bitcoin/BCHAIN-DIFF.csv")
+bitcoin_hrate <- read.csv("./data/Bitcoin/BCHAIN-HRATE.csv")
+bitcoin_mkpru <- read.csv("./data/Bitcoin/BCHAIN-MKPRU.csv")
+bitcoin_trvou <- read.csv("./data/Bitcoin/BCHAIN-TRVOU.csv")
+```
+
+## Czyszczenie danych
+### Zbiór wdi (World Development Indicators)
+Kolumna `Series Name` została przeniesiona ze zbioru `wdi` do zbioru `wdi_names`, ponieważ została uznana za zbędną i utrudniającą dalszą pracę na zbiorze danych - była opisem danego wskaźnika gospodarczego, którego identyfikator znajdował się w kolumnie `Series Code`. Usunięta została również kolumna `Country Code`, ponieważ nie została wykorzystana w dalszej analizie.
+
+Czyszczenie zbioru `wdi` obejmowało:
+
+1. Usunięcie wierszy zawierających wszystkie wartości puste.
+2. Skondensowanie kolumn z latami do jednej kolumny `Year`.
+3. Usunięcie duplikatów wierszy.
+4. Rozszerzenie kolumny `Series Code` do postaci wielu kolumn.
+5. Wybranie tylko tych kolumn ze wskaźnikami, które posiadają przynajmniej 50% uzupełnionych wartości.
+6. Zmiany formatu daty kolumny `Year` z `yyyy [YRyyyy]` na `yyyy`.
+7. Przekonwertowanie kolumn ze wskaźnikami na typ numeryczny. Podczas takiej konwersji wartości puste w postaci `..` zostały zamienione na NA.
+```{r, class.source = "fold-show"}
+wdi_names <- wdi %>%
+  select("Series Code", "Series Name") %>%
+  distinct()
+
+wdi_reshaped <- wdi %>%
+  select(-c("Series Name", "Country Code")) %>%
+  filter(!if_all(3:53, ~ . == ".."), na.rm = TRUE) %>%
+  gather("Year", "Value", 3:53) %>%
+  distinct() %>%
+  spread("Series Code", "Value") %>%
+  select(which(colMeans(!is.na(.) & . != "..") > 0.5)) %>%
+  mutate(Year = substr(Year, 0, 4)) %>%
+  mutate_at(3:115, function(x) as.numeric(x))
+```
+<br />
+
+#### Podsumowanie zbioru wdi_reshaped
+```{r, results = "hold"}
+kable(summary(wdi_reshaped)) %>%
+  kable_styling("striped") %>%
+  scroll_box(width = "100%")
+```
+<br />
+
+#### Podsumowanie zbioru wdi_names
+```{r, results = "hold"}
+kable(summary(wdi_names)) %>% kable_styling("striped")
+```
+
+### Zbiór gold_prices (Gold Prices)
+Czyszczenie zbioru danych `gold_prices` obejmowało:
+
+1. Utworzenie nowej kolumny `USD`, która była średnią arytmetyczną kolumny `USD..AM.` oraz `USD..PM.`, czyli cen zbieranych w godzinach porannych i popołudniowych.
+2. Wybranie tylko kolumny `Date` i `USD`.
+3. Zmiana formatu daty `yyyy-mm-dd` na wartość numeryczną timestamp.
+```{r, class.source = "fold-show"}
+gold_prices_reshaped <- gold_prices %>%
+  mutate(USD = (USD..AM. + USD..PM.) / 2) %>%
+  select(Date, USD) %>%
+  mutate(Date = as.numeric(as.POSIXct(Date, format = "%Y-%m-%d")))
+```
+<br />
+
+#### Podsumowanie zbioru gold_prices_reshaped
+```{r, results = "hold"}
+kable(summary(gold_prices_reshaped)) %>% kable_styling("striped")
+```
+
+### Zbiór sp_reshaped (S&P Composite)
+Czyszczenie danych `S&P Composite` obejmowało
+
+1. Zmiana formatu daty `yyyy-mm-dd` na wartość numeryczną.
+2. Zmiana nazwy kolumny z `Year` na `Date`.
+3. Konwersja wszystkich kolumn na wartości numeryczne.
+4. Usunięcie wierszy z wartościami NA.
+```{r, class.source = "fold-show"}
+sp_reshaped <- sp_composite %>%
+  mutate(Year = as.numeric(as.POSIXct(Year, format = "%Y-%m-%d"))) %>%
+  rename(Date = Year) %>%
+  mutate_all(function(x) as.numeric(x)) %>%
+  drop_na()
+```
+<br />
+
+#### Podsumowanie zbioru sp_reshaped:
+```{r, results = "hold"}
+kable(summary(sp_reshaped)) %>%
+  kable_styling("striped") %>%
+  scroll_box(width = "100%")
+```
+
+### Zbiór bitcoin_all (dane dotyczące obrotu bitcoinem)
+Dane dotyczące bitcoina `(bitcoin_mkpru, bitcoin_hrate, bitcoin_diff, bitcoin_trvou)` zostały połączone w jeden zbiór danych za pomocą operacji `inner_join`. Ten sposób połączenia pozwolił na wyeliminowanie części wartości pustych.
+
+Łączenie i czyszczenie obejmowało:
+
+1. Połączenie zbiorów danych `bitcoin_mkpru`, `bitcoin_hrate`, `bitcoin_diff`, `bitcoin_trvou` za pomocą operacji `inner_join`.
+2. Zmiana nazw kolumn na odpowiadające wskaźnikom.
+3. Zmiana formatu daty z `yyyy-mm-dd` na wartość numeryczną timestamp.
+4. Konwersja kolumn ze wskaźnikami na wartości numeryczne.
+
+```{r, class.source = "fold-show"}
+bitcoin_all <- inner_join(bitcoin_mkpru, bitcoin_diff, by = "Date") %>%
+  inner_join(bitcoin_hrate, by = "Date") %>%
+  inner_join(bitcoin_trvou, by = "Date") %>%
+  rename("mkpru" = `Value.x`, "diff" = `Value.y`, "hrate" = `Value.x.x`, "trvou" = `Value.y.y`) %>%
+  mutate(Date = as.numeric(as.POSIXct(Date, format = "%Y-%m-%d"))) %>%
+  mutate_at(2:5, function(x) as.numeric(x))
+```
+<br />
+
+#### Podsumowanie zbioru bitcoin_all
+```{r, results = "hold"}
+kable(summary(bitcoin_all)) %>% kable_styling("striped")
+```
+
+## Sprawdzenie korelacji między wskaźnikami gospodarczymi
+Do sprawdzenia korelacji zostały wykorzystane jedynie kolumny numeryczne. Macierz korelacji została stworzona z wykorzystaniem funkcji `cor` z parametrem `pairwise.complete.obs`, który pomijał w obliczeniach pary, które zawierały wartości NA. Komórki znajdujące się na głównej przekątnej macierzy oraz ponad nią zostały usunięte. Następnie macierz została przetransformowana do tabeli, w której w wierszu znajdowały się wskaźniki gospodarcze oraz wartość korelacji pomiędzy nimi. Wybrane zostały korelacje z przedziału (0.75, 0.9), ponieważ wartości powyżej 0.9 wskazywały oczywiste związki między zmiennymi np. wzrost liczby ludności i wzrost liczby kobiet/mężczyzn w kraju.
+```{r, class.source = "fold-show"}
+wdi_cor_matrix <- wdi_reshaped %>%
+  select(3:115) %>%
+  cor(use = "pairwise.complete.obs")
+wdi_cor_matrix[!lower.tri(wdi_cor_matrix)] <- NA
+
+wdi_cor <- wdi_cor_matrix %>%
+  data.frame() %>%
+  rownames_to_column(var = "A") %>%
+  gather(key = "B", value = "Correlation", -A) %>%
+  filter(abs(Correlation) < 0.9 & abs(Correlation) > 0.75)
+```
+
+Do tabeli korelacji zostały dołączone opisy poszczególnych wskaźników w celu łatwiejszej interpretacji.
+
+```{r, class.source = "fold-show"}
+wdi_cor_names <- inner_join(wdi_cor, wdi_names, by = c("A" = "Series Code")) %>%
+  inner_join(wdi_names, by = c("B" = "Series Code")) %>%
+  mutate(A = `Series Name.x`, B = `Series Name.y`) %>%
+  select(-c(`Series Name.x`, `Series Name.y`))
+```
+
+### Tabela korelacji wskaźników gospodarczych
+
+```{r, results = "hold"}
+prettyTable <- function(table_df, round_digits=2) {
+    DT::datatable(table_df, style="bootstrap", filter = "top", rownames = FALSE, extensions = "Buttons", options = list(dom = 'Bfrtip', buttons = c('copy', 'csv', 'excel', 'pdf', 'print'))) %>% formatRound(names(dplyr::select_if(table_df, is.numeric)), round_digits)
+}
+
+prettyTable(wdi_cor_names)
+```
+
+### Wykres macierzy korelacji wskaźników gospodarczych
+```{r, results = "hold"}
+p <- ggcorrplot(wdi_cor_matrix) +
+  labs(x = "Wskaźnik 1", y = "Wskaźnik 2") +
+  theme_classic() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank())
+
+ggplotly(p)
+```
+
+### Emisja CO2
+Z powyższych wyliczeń wynika, że emisja CO2 jest silnie skorelowana z importem oraz eksportem dóbr. Zależność jest widoczna między kolumnami: `CO2 emissions from liquid fuel consumption (kt)`, `CO2 emissions from gaseous fuel consumption (kt)`, a kolumnami: `Goods exports (BoP, current US$)`, `Goods imports (BoP, current US$)`. Współczynnik korelacji między kolumnami znajduje się w przedziale <0.80, 0.87> i zależność ta wskazuje na silną potrzebę rozwoju silników elektrycznych, które są mniej destrukcyjne dla środowiska.
+
+#### Import/eksport dóbr a emisja CO2 przez spalanie paliwa w stanie ciekłym/gazowym w USA
+```{r, results = "hold"}
+co2_import_export <- wdi_reshaped %>%
+  select(c(`Year`, `Country Name`, `EN.ATM.CO2E.LF.KT`, `EN.ATM.CO2E.GF.KT`, `BM.GSR.MRCH.CD`, `BX.GSR.MRCH.CD`)) %>%
+  filter(`Country Name` == "United States")
+
+co2_import_plot <- ggplot(co2_import_export, aes(x = Year, y = `BM.GSR.MRCH.CD`)) +
+  geom_point() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank()) +
+  labs(x = "Rok", y = "Import dóbr")
+
+co2_export_plot <- ggplot(co2_import_export, aes(x = Year, y = `BX.GSR.MRCH.CD`)) +
+  geom_point() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank()) +
+  labs(x = "Rok", y = "Eksport dóbr")
+
+co2_liq_plot <- ggplot(co2_import_export, aes(x = Year, y = `EN.ATM.CO2E.LF.KT`)) +
+  geom_point() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank()) +
+  labs(x = "Rok", y = "CO2 (paliwo w stanie ciekłym)")
+
+co2_gas_plot <- ggplot(co2_import_export, aes(x = Year, y = `EN.ATM.CO2E.GF.KT`)) +
+  geom_point() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank()) +
+  labs(x = "Rok", y = "CO2 (paliwo w stanie gazowym)")
+
+grid.arrange(co2_import_plot, co2_export_plot, co2_liq_plot, co2_gas_plot, ncol = 4)
+```
+
+## Analiza wybranych wskaźników gospodarczych
+### Zmiana populacji kobiet i mężczyzn w Chinach, Indiach i USA.
+```{r, results = "hold", class.source = "fold-show"}
+population_comparison <- wdi_reshaped %>%
+  select(Year, `Country Name`, `SP.POP.TOTL.MA.IN`, `SP.POP.TOTL.FE.IN`) %>%
+  filter(`Country Name` %in% c("China", "United States", "India")) %>%
+  mutate(Year = as.numeric(Year))
+
+plot <- population_comparison %>%
+  mutate(`SP.POP.TOTL.MA.IN` = `SP.POP.TOTL.MA.IN` / 1000000000, `SP.POP.TOTL.FE.IN` = `SP.POP.TOTL.FE.IN` / 1000000000) %>%
+  ggplot(aes(x = Year)) +
+  geom_line(aes(y = `SP.POP.TOTL.MA.IN`, color = "Mezczyzni")) +
+  geom_line(aes(y = `SP.POP.TOTL.FE.IN`, color = "Kobiety")) +
+  facet_grid(. ~ `Country Name`) +
+  labs(x = "Rok", y = "Populacja [mld]", color = "Plec")
+
+plot.animation <- plot +
+  transition_reveal(Year)
+animate(plot.animation, renderer = gifski_renderer())
+```
+
+Wykres wskazuje znaczny wzrost populacji kobiet i meżczyzn zarówno w Chinach jak i Indiach, przy stopniowym wzroście w USA. Na zmniejszenie dynamiki wzrostu liczby ludności w Chinach ma wpływ prawdopodobnie polityka jednego dziecka obowiązująca w latach 1977-2015. Z tego również względu wynikać może spora różnica między populacją kobiet i mężczyzn, ponieważ rodziny mogły mieć jedno dziecko (większa liczba powodowała problemy ekonomiczne narzucone przez państwo) i bardziej preferowany był syn niż córka, co jest częstym zjawiskiem w krajach azjatyckich np. Indie. W krajach zachodnich różnica między populacją kobiet i mężczyzn jest niska tak jak wskazuje powyższy wykres dla kraju USA.
+
+## Korelacja w zbiorze bitcoin_all, gold_prices_reshaped i sp_reshaped
+Do stworzenia regresora potrzebne były informacje, które pozwolą na jak najlepszą predykcję ceny bitcoina, dlatego sprawdzona została korelacja między kolumnami w zbiorach `bitcoin_all`, `gold_prices_reshaped` i `sp_reshaped`. Najpierw, dane dotyczące bitcoina zostały połączone ze zbiorem z cenami złota po kolumnie `Date` z wykorzystaniem funkcji `inner_join`, aby zmniejszyć występowanie wartości pustych. Następnie do wynikowego zbioru został dołączony zbiór `sp_reshaped` z wykorzystaniem operacji `left_join`. Różnica w sposobie połączenia wynikała z tego, że dane dotyczące bitcoina oraz cen złota były zbierane codziennie, natomiast informacje zawarte w zbiorze `sp_reshaped` dotyczyły każdego miesiąca. Taki sposób połączenia pozwolił na wypełnienie wartości pustych występujących w każdym dniu danego miesiąca przez wykorzystanie funkcji `fill` z parametrem `downup`.
+
+```{r, class.source = "fold-show"}
+bitcoin_gold_sp <- inner_join(bitcoin_all, gold_prices_reshaped, by = "Date") %>%
+  left_join(sp_reshaped, by = "Date") %>%
+  mutate_all(function(x) as.numeric(x)) %>%
+  fill(7:15, .direction = "downup")
+
+bitcoin_gold_sp_cor_matrix <- bitcoin_gold_sp %>%
+  select(2:15) %>%
+  cor(use = "pairwise.complete.obs")
+
+bitcoin_gold_sp_cor_matrix[!lower.tri(bitcoin_gold_sp_cor_matrix)] <- NA
+```
+
+
+### Wykres macierzy korelacji zbioru bitcoin_gold_sp
+```{r, results = "hold"}
+p <- ggcorrplot(bitcoin_gold_sp_cor_matrix) +
+  theme_classic() +
+  theme(axis.title = element_blank(), axis.ticks = element_blank(), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+ggplotly(p)
+```
+
+### Tabela korelacji zbioru bitcoin_gold_sp
+Zostały wybrane te kolumny, które z kolumną `mkpru` (ceną bitcoina) najbardziej korelują (współczynnik korelacji większy od 0.5) i posłużą do stworzenia regresora przewidującego cenę bitcoina.
+```{r, class.source = "fold-show"}
+bitcoin_gold_sp_cor <- bitcoin_gold_sp_cor_matrix %>%
+  data.frame() %>%
+  rownames_to_column(var = "A") %>%
+  gather(key = "B", value = "Correlation", -A) %>%
+  filter((A == "mkpru" | B == "mkpru") & abs(Correlation) > 0.5)
+
+prettyTable(bitcoin_gold_sp_cor)
+
+bitcoin_reg <- bitcoin_gold_sp %>%
+  select(c(Date, mkpru, diff, hrate, trvou, `S.P.Composite`, Dividend, CPI, `Real.Price`, `Real.Dividend`, `Cyclically.Adjusted.PE.Ratio`))
+```
+
+## Regresor przewidujący cenę bitcoina
+Zbiór `bitcoin_reg` zawierający wszystkie statystyki dotyczące bitcoina, cen złota oraz S&P Composite został podzielony na zbiór uczący oraz testowy w sposób losowy w stosunku 1:3. Zbiór walidujący został stworzony wykorzystując powtarzaną ocenę krzyżową z liczbą podziałów 2 i liczbą powtórzeń 5.
+```{r, class.source = "fold-show"}
+bitcoin_in_training <- createDataPartition(y = bitcoin_reg$mkpru, p = 0.75, list = FALSE)
+bitcoin_training <- bitcoin_reg[bitcoin_in_training,] %>% as.data.frame()
+bitcoin_testing <- bitcoin_reg[-bitcoin_in_training,] %>% as.data.frame()
+bitcoin_ctrl <- trainControl(method = "repeatedcv", number = 2, repeats = 5)
+```
+
+Poniższy wykres przedstawia podobieństwo rozkładów danych uczących i testowych.
+```{r}
+ggplot() +
+  geom_density(aes(mkpru, fill = "Uczący"), bitcoin_training, alpha = 0.6) +
+  geom_density(aes(mkpru, fill = "Testowy"), bitcoin_testing, alpha = 0.6) +
+  labs(x = "mkpru", y = "Gęstość", fill = "Zbiór")
+```
+
+### Algorytm Lasso
+Pierwszy model został stworzony z wykorzystaniem algorytmu `lasso`.
+```{r, class.source = "fold-show"}
+bitcoin_fit_lasso <- train(mkpru ~ ., data = bitcoin_training, method = "lasso")
+```
+<br />
+
+#### Ważność atrybutów dla znalezionego modelu
+```{r}
+ggplot(varImp(bitcoin_fit_lasso)) +
+  labs(x = "Ważność", y = "Cecha")
+```
+
+#### Predykcja modelu
+```{r, class.source = "fold-show"}
+bitcoin_lasso_predicted <- predict(bitcoin_fit_lasso, bitcoin_testing) %>%
+  as.data.frame()
+```
+
+Do oceny predykcji wykorzystane zostały dwie miary: `R2` oraz `RMSE`.
+```{r, results = "hold"}
+lasso_rmse <- RMSE(unlist(bitcoin_lasso_predicted), bitcoin_testing$mkpru)
+lasso_r2 <- R2(unlist(bitcoin_lasso_predicted), bitcoin_testing$mkpru)
+print(paste("RMSE: ", lasso_rmse))
+print(paste("R2: ", lasso_r2))
+```
+
+Poniższy wykres przedstawia wartości zbioru testowego i wartości wynikowe modelu
+```{r}
+bitcoin_predicted_lasso_compare <- data.frame(date = bitcoin_testing$Date, actual = bitcoin_testing$mkpru, predicted = bitcoin_lasso_predicted$.)
+
+ggplot(bitcoin_predicted_lasso_compare, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Testowe")) +
+  geom_line(aes(y = predicted, color = "Lasso")) +
+  labs(color = "Wartości", x = "Data", y = "mkpru") +
+  theme(axis.ticks.x = element_blank(), axis.text.x = element_blank())
+```
+
+### Algorytm Ridge
+Kolejny model został stworzony z wykorzystaniem algorytmu `ridge`.
+```{r, class.source = "fold-show"}
+bitcoin_fit_ridge <- train(mkpru ~ ., data = bitcoin_training, method = "ridge")
+```
+<br />
+
+#### Ważność atrybutów dla znalezionego modelu
+```{r}
+ggplot(varImp(bitcoin_fit_ridge)) +
+  labs(x = "Ważność", y = "Cecha")
+```
+
+#### Predykcja modelu
+```{r, class.source = "fold-show"}
+bitcoin_ridge_predicted <- predict(bitcoin_fit_ridge, bitcoin_testing) %>%
+  as.data.frame()
+```
+
+Do oceny predykcji wykorzystane zostały dwie miary: `R2` oraz `RMSE`.
+```{r, results = "hold"}
+ridge_rmse <- RMSE(unlist(bitcoin_ridge_predicted), bitcoin_testing$mkpru)
+ridge_r2 <- R2(unlist(bitcoin_ridge_predicted), bitcoin_testing$mkpru)
+print(paste("RMSE: ", ridge_rmse))
+print(paste("R2: ", ridge_r2))
+```
+
+Poniższy wykres przedstawia wartości zbioru testowego i wartości wynikowe modelu
+```{r}
+bitcoin_predicted_ridge_compare <- data.frame(date = bitcoin_testing$Date, actual = bitcoin_testing$mkpru, predicted = bitcoin_ridge_predicted$.)
+
+ggplot(bitcoin_predicted_ridge_compare, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Testowe")) +
+  geom_line(aes(y = predicted, color = "Ridge")) +
+  labs(color = "Wartości", x = "Data", y = "mkpru") +
+  theme(axis.ticks.x = element_blank(), axis.text.x = element_blank())
+```
+
+### Porównanie modeli
+```{r, class.source = "fold-show"}
+model_list <- list(lasso = bitcoin_fit_lasso, ridge = bitcoin_fit_ridge)
+res <- resamples(model_list)
+summary(res)
+```
+
+```{r}
+bitcoin_predicted_compare <- data.frame(date = bitcoin_testing$Date, actual = bitcoin_testing$mkpru, predicted_lasso = bitcoin_lasso_predicted$., predicted_ridge = bitcoin_ridge_predicted$.)
+
+ggplot(bitcoin_predicted_compare, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Testowe")) +
+  geom_line(aes(y = predicted_lasso, color = "Lasso")) +
+  geom_line(aes(y = predicted_ridge, color = "Ridge")) +
+  labs(color = "Wartości", x = "Data", y = "mkpru") +
+  theme(axis.ticks.x = element_blank(), axis.text.x = element_blank())
+```
